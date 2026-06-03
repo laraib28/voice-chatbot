@@ -29,11 +29,10 @@ export async function POST(request: NextRequest) {
     console.log("[voice/chat] transcribing audio, size:", audioFile.size);
 
     // Step 1: Transcribe audio with Whisper
-    // Whisper: use Urdu language hint for both Urdu script and Roman Urdu
     const transcription = await openai.audio.transcriptions.create({
       file: audioFile,
       model: "whisper-1",
-      language: "ur",  // Urdu/Roman Urdu speakers — Whisper handles both
+      // No language hint — Whisper auto-detects English/Urdu/Roman Urdu
     });
 
     const userText = transcription.text.trim();
@@ -80,23 +79,22 @@ export async function POST(request: NextRequest) {
     const agentResponse = await runAgent(systemPrompt, history, userText);
     console.log("[voice/chat] agent replied");
 
-    // Step 3: Convert reply to speech
-    const ttsResponse = await openai.audio.speech.create({
-      model: "tts-1",
-      voice: "alloy",
-      input: agentResponse.reply,
-      response_format: "mp3",
-    });
+    // TTS + DB save in parallel — saves ~1s
+    const [ttsResponse] = await Promise.all([
+      openai.audio.speech.create({
+        model: "tts-1",
+        voice: "alloy",
+        input: agentResponse.reply,
+        response_format: "mp3",
+      }),
+      supabase.from("chat_messages").insert([
+        { session_id: sessionId, role: "user", content: userText },
+        { session_id: sessionId, role: "assistant", content: agentResponse.reply },
+      ]),
+    ]);
 
     const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
 
-    // Persist messages
-    await supabase.from("chat_messages").insert([
-      { session_id: sessionId, role: "user", content: userText },
-      { session_id: sessionId, role: "assistant", content: agentResponse.reply },
-    ]);
-
-    // Return transcript + reply text + audio as base64
     return NextResponse.json({
       transcript: userText,
       reply: agentResponse.reply,
